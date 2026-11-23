@@ -18,6 +18,7 @@ from kit import *  # noqa: E402,F403  (resets the scene)
 import addon_utils  # noqa: E402
 import numpy as np  # noqa: E402
 from mathutils.bvhtree import BVHTree  # noqa: E402
+from mathutils.kdtree import KDTree  # noqa: E402
 
 HEIGHT = 1.80
 SUBD = 1 if QUICK else 2           # subsurf levels on every piece
@@ -87,6 +88,8 @@ def bisect(bm, keep):
 
 def link(name, bm):
     me = bpy.data.meshes.new(name)
+    for lay in list(bm.verts.layers.deform.values()):   # drop the body's weights; skinning sets fresh ones
+        bm.verts.layers.deform.remove(lay)
     bm.to_mesh(me)
     bm.free()
     o = bpy.data.objects.new(name, me)
@@ -138,7 +141,7 @@ def shell(name, mask, mat, inflate, thick, keep=(), smooth=0, src=None, presub=0
     sol.thickness = thick
     sol.offset = 1.0
     sol.use_quality_normals = True
-    sol.use_even_offset = True
+    sol.use_even_offset = False             # even offset spikes to infinity at sharp creases
     o.data.materials.append(mat)
     o.data.shade_smooth()
     return o
@@ -240,7 +243,10 @@ for m in list(body.modifiers):
     if m.type == "ARMATURE":
         body.modifiers.remove(m)
 apply_modifiers(body)                       # MASK modifier: drops eye/teeth/hair helpers
-bpy.data.objects.remove(rig)
+for c in rig.users_collection:               # keep the skeleton; it drives every garment
+    c.objects.unlink(rig)
+COL.objects.link(rig)
+rig.name = rig.data.name = "Raider_Skeleton"
 if body.name not in COL.objects:
     for c in body.users_collection:
         c.objects.unlink(body)
@@ -320,7 +326,7 @@ shell("Goggle_Strap", None, MAT["webbing"], 0.010, 0.003, src=head_last,
 # respirator: rubber face piece over nose and mouth, twin filters, centre valve
 resp = shell("Respirator", None, MAT["rubber"], 0.013, 0.006, src=head_last, smooth=18,
              keep=[(Vector((0, 0, eye_z - 0.018)), Z), (Vector((0, 0, mouth_c.z - 0.06)), -Z),
-                   (Vector((0, mouth_c.y + 0.055, 0)), Vector((0, 1, 0.35)).normalized())])
+                   (Vector((0, mouth_c.y + 0.055, mouth_c.z)), Vector((0, 1, 0.35)).normalized())])
 valve_c = Vector((0, mouth_c.y - 0.03, mouth_c.z - 0.008))
 hitv = HT.ray_cast(Vector((0, -0.5, mouth_c.z - 0.008)), Vector((0, 1, 0)))[0]
 if hitv:
@@ -559,15 +565,46 @@ for s, sgn in (("l", 1), ("r", -1)):            # shoulder straps into the pack
 # ----------------------------------------------------------------------------- 9. finish: hide base body, ground, report
 body.hide_render = True
 body.hide_viewport = True
-helm_tmp = [head_last]
-for o in helm_tmp:
-    bpy.data.objects.remove(o)
+bpy.data.objects.remove(head_last)
+
+# skinning: hard gear rides one bone rigidly, everything else copies the weights of the nearest
+# body vertex (weights live on the base mesh and are interpolated through subsurf/solidify)
+RIGID = [("Helmet", "head"), ("Ear_", "head"), ("Goggle", "head"), ("Resp", "head"), ("Filter", "head"),
+         ("Chest_Plate", "spine_03"), ("Radio", "spine_03"), ("Rig_Pouch", "spine_02"),
+         ("Pack_", "spine_03"), ("Bedroll", "spine_03"), ("Belt_", "pelvis"), ("Canteen", "pelvis"),
+         ("Shoulder_Pad_l", "upperarm_l"), ("Knee_Pad_l", "calf_l"), ("Knee_Pad_r", "calf_r"),
+         ("Knuckle_Guard_l", "hand_l"), ("Knuckle_Guard_r", "hand_r")]
+bones = {b.name for b in rig.data.bones}
+bco = get_co(body.data)
+kd = KDTree(len(bco))
+for i, p in enumerate(bco):
+    kd.insert(p, i)
+kd.balance()
+gname = {g.index: g.name for g in body.vertex_groups}
+vw = [[(gname[g.group], g.weight) for g in v.groups if gname[g.group] in bones and g.weight > 0.01]
+      for v in body.data.vertices]
+parts = [o for o in COL.objects if o.type == "MESH" and o is not body]
+for o in parts:
+    rigid = next((b for p, b in RIGID if o.name.startswith(p)), None)
+    if rigid:
+        o.vertex_groups.new(name=rigid).add(range(len(o.data.vertices)), 1.0, "REPLACE")
+    else:
+        mw = o.matrix_world
+        groups = {}
+        for v in o.data.vertices:
+            for name, w in vw[kd.find(mw @ v.co)[1]]:
+                g = groups.get(name) or groups.setdefault(name, o.vertex_groups.new(name=name))
+                g.add([v.index], w, "REPLACE")
+    arm = o.modifiers.new("Armature", "ARMATURE")
+    arm.object = rig
+    o.parent = rig
+    o.matrix_parent_inverse = Matrix.Identity(4)
+
 bpy.context.view_layer.update()
 dg = bpy.context.evaluated_depsgraph_get()
-low = min((o.evaluated_get(dg).matrix_world @ Vector(c)).z for o in COL.objects
-          if o.type in ("MESH", "CURVE") and not o.hide_render for c in o.evaluated_get(dg).bound_box)
-for o in COL.objects:
-    o.location.z -= low
+low = min((o.evaluated_get(dg).matrix_world @ v.co).z for o in parts if o.name == "Boot_Soles"
+          for v in o.evaluated_get(dg).data.vertices)
+rig.location.z -= low
 bpy.context.view_layer.update()
 dg = bpy.context.evaluated_depsgraph_get()
 tris = 0
@@ -635,16 +672,68 @@ for look_name in ("AgX - Medium High Contrast", "Medium High Contrast"):
 os.makedirs(OUT, exist_ok=True)
 scene.camera = cam_objs["hero"]
 bpy.ops.wm.save_as_mainfile(filepath=os.path.join(OUT, "raider.blend"))
-if "noexport" not in ARGS and not QUICK:
-    floor.hide_select = True
-    for o in bpy.context.view_layer.objects:
-        o.select_set(o.name in COL.objects and not o.hide_render and o is not floor)
-    bpy.ops.export_scene.gltf(filepath=os.path.join(OUT, "raider.glb"), export_format="GLB",
-                              use_selection=True, export_apply=True)
-    print("EXPORTED", os.path.join(OUT, "raider.glb"))
 only = [a for a in ARGS if a in cams]
 for view in (only or cams):
     scene.camera = cam_objs[view]
     r.filepath = os.path.join(OUT, f"raider_{view}.png")
     bpy.ops.render.render(write_still=True)
     print("RENDERED", r.filepath)
+
+
+# rig test: an action pose rendered from the hero camera (exports below stay in the rest A-pose)
+def rotate_world(pb, axis, angle):
+    h = pb.head.copy()
+    pb.matrix = (Matrix.Translation(h) @ Matrix.Rotation(angle, 4, axis.normalized())
+                 @ Matrix.Translation(-h) @ pb.matrix)
+    bpy.context.view_layer.update()
+
+
+P = rig.pose.bones
+if not only or "pose" in ARGS:
+    for s, sgn in (("l", 1), ("r", -1)):
+        rotate_world(P[f"upperarm_{s}"], Vector((0, sgn, 0)), math.radians(48))
+        d = (P[f"lowerarm_{s}"].tail - P[f"lowerarm_{s}"].head).normalized()
+        rotate_world(P[f"lowerarm_{s}"], d.cross(Vector((0, -1, 0))), math.radians(35))
+    rotate_world(P["thigh_r"], Vector((1, 0, 0)), math.radians(-28))
+    rotate_world(P["calf_r"], Vector((1, 0, 0)), math.radians(45))
+    rotate_world(P["thigh_l"], Vector((1, 0, 0)), math.radians(8))
+    rotate_world(P["spine_03"], Z, math.radians(12))
+    rotate_world(P["head"], Z, math.radians(-18))
+    scene.camera = cam_objs["hero"]
+    r.filepath = os.path.join(OUT, "raider_pose.png")
+    bpy.ops.render.render(write_still=True)
+    print("RENDERED", r.filepath)
+    for pb in P:
+        pb.matrix_basis = Matrix.Identity(4)
+    bpy.context.view_layer.update()
+
+if "noexport" not in ARGS and not QUICK:
+    def select_model():
+        for o in bpy.context.view_layer.objects:
+            o.select_set(o is rig or (o in parts and not o.hide_render))
+
+    select_model()
+    bpy.ops.export_scene.gltf(filepath=os.path.join(OUT, "raider.glb"), export_format="GLB",
+                              use_selection=True, export_apply=True, export_skins=True)
+    print("EXPORTED", os.path.join(OUT, "raider.glb"))
+    # game version: no subdivision or fold displacement, same skeleton and skinning
+    for o in parts:
+        for m in o.modifiers:
+            if m.type == "SUBSURF":
+                m.levels = 0
+            elif m.type == "DISPLACE":
+                m.show_viewport = False
+    bpy.context.view_layer.update()
+    dg = bpy.context.evaluated_depsgraph_get()
+    game_tris = 0
+    for o in parts:
+        me = o.evaluated_get(dg).data
+        me.calc_loop_triangles()
+        game_tris += len(me.loop_triangles)
+    print(f"[raider] game tris={game_tris:,}")
+    select_model()
+    bpy.ops.export_scene.gltf(filepath=os.path.join(OUT, "raider_game.glb"), export_format="GLB",
+                              use_selection=True, export_apply=True, export_skins=True)
+    bpy.ops.export_scene.fbx(filepath=os.path.join(OUT, "raider_game.fbx"), use_selection=True,
+                             add_leaf_bones=False, use_mesh_modifiers=True, mesh_smooth_type="FACE")
+    print("EXPORTED game versions")
