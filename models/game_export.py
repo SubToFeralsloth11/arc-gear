@@ -102,7 +102,10 @@ def bake_and_join(objs, name, size):
         for mod in list(o.modifiers):
             if mod.type == "ARMATURE":
                 continue
-            if not mod.show_render:
+            # switched off (fold displacement) or a no-op (subdivision at level 0): the bake already
+            # matched the evaluated mesh, so these simply go
+            noop = mod.type == "SUBSURF" and mod.levels == 0
+            if noop or not (mod.show_render and mod.show_viewport):
                 o.modifiers.remove(mod)
                 continue
             only_select([o])
@@ -145,7 +148,7 @@ if "raider" in targets:
     for o in [o for o in bpy.data.objects if o.parent is rig and o.parent_type == "BONE"]:
         bpy.data.objects.remove(o)              # the preview rifle on weapon_r
     parts = [o for o in rig.children if o.type == "MESH" and not o.hide_render]
-    body = bake_and_join(parts, "Raider", 1024 if QUICK else 4096)
+    body = bake_and_join(parts, "Raider", 1024 if QUICK else 2048)
     rig.data.pose_position = "POSE"
     export(os.path.join(GAME, "raider.glb"), [rig, body], anim=True)
 
