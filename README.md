@@ -13,6 +13,8 @@ Procedural Blender models of Arc Raiders-inspired gear. Every model is a Python 
 | `models/shield_recharger.py` | Handheld shield recharger cell |
 | `models/bandage.py` | Elastic bandage roll plus field-dressing pouch |
 | `models/raider.py` | Original scavenger raider character: respirator, goggles, helmet, layered jacket and trousers, chest rig, belt pouches, backpack with bedroll (needs the MPFB extension) |
+| `models/raider_anim.py` | Procedural animation set for the raider: heavy, gear-laden locomotion, rifle holds, reload, throw, loot, roll |
+| `models/game_export.py` | Bakes the procedural materials to textures and writes game GLBs for the raider and all gear |
 
 `kit.py` holds the shared materials, geometry helpers, studio lighting and render setup.
 
@@ -30,4 +32,31 @@ The raider is grown from an anatomical MakeHuman (MPFB) body. Each garment is a 
 
 All of them are exported in the rest A-pose.
 
-The procedural materials render in Blender (Cycles). Exporting to a game engine needs the textures baked to images first.
+The procedural materials render in Blender (Cycles). `models/game_export.py` bakes them to textures for game engines (below).
+
+## Raider animation
+
+`models/raider_anim.py` keys 30 clips onto `Raider_Skeleton` (run `models/raider.py` first). Every clip is posed by code and baked per frame, so a change to a gait parameter re-bakes the whole set consistently.
+
+- **Weight:** low hips and always-bent knees, chest hunched over the toes, arms held off the body by the gear, a hard hip dip after each footfall, and a torso that trails the hips.
+- **Balance:** a centre-of-mass model (body segments, an 11 kg pack, the rifle) is solved every frame. The hips slide until the mass sits over the loaded support: both boots, one boot, the ball of a raised heel, or knee plus toes when kneeling. Weight hands over from boot to boot while walking. The bake log prints the remaining offset per clip.
+- **Boots:** planted soles stay flat and don't slide, heels peel over the ball, toes lift on the heel strike, the pushing boot rolls onto its inner edge in strafes, and knees track over the toes.
+- **Weapon holds:** shouldered aim, low ready and sprint carry are placed in the chest frame, and both hands are locked to the rifle by two-bone IK (right hand on the pistol grip, left hand under the handguard). The shoulder blade reaches forward when the handguard is out of reach. The rifle rides a `weapon_r` socket bone under `hand_r`; parenting any weapon to it, with no offset, puts it in the hands.
+
+| Clips | Speed (m/s) |
+|---|---|
+| Idle, Idle_Scan, Crouch_Idle, Fall_Loop | in place |
+| Walk / Jog / Sprint | 1.25 / 2.9 / 5.0 |
+| Crouch_Walk, Walk_Back, Strafe_L, Strafe_R | 1.0, 1.0, 0.75, 0.75 |
+| Rifle_ versions of all of the above, plus Rifle_Aim_Walk | same, Aim_Walk 0.95 |
+| Rifle_Idle, Rifle_Aim, Rifle_Fire, Rifle_Reload, Rifle_Crouch_Idle | in place |
+| Jump_Start, Jump_Land, Dodge_Roll, Loot, Throw (release at frame 15), Use_Item | one-shot |
+
+```sh
+blender -b -P models/raider_anim.py                 # bake, export out/raider_anim.glb/.fbx, preview videos
+blender -b -P models/raider_anim.py -- quick        # fast Workbench previews, no export
+blender -b -P models/raider_anim.py -- Walk Throw   # only the named clips
+blender -b -P models/game_export.py                 # out/game/raider.glb + out/game/<gear>.glb, baked textures
+```
+
+Previews go to `out/anim/<clip>.mp4`, plus `out/anim/raider_reel.mp4` with every clip in sequence. All clips are in place (no root motion); move the character controller at the listed speed.
